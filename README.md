@@ -92,7 +92,9 @@ The addon needs a mesh with **ARKit shape keys that have actual vertex deformati
 
 ### Demo Head (Quick Start)
 
-Click **Load Demo Head** in the Model Setup panel to create a procedural head with all 52 ARKit blendshapes. This is the fastest way to test the addon — the deformations are built in and ready to animate.
+Click **Load Demo Head** in the Model Setup panel to instantly load the bundled **ICT-FaceKit** head model (26,719 vertices, 51 ARKit blendshapes with real vertex deformations). This is the fastest way to test the addon — the deformations are built in and ready to animate.
+
+The demo head is from [ICT-FaceKit](https://github.com/USC-ICT/ICT-FaceKit) by the USC Institute for Creative Technologies (MIT License).
 
 ### Transfer to Custom Mesh
 
@@ -172,5 +174,6 @@ Bundled dependencies:
 - `nvidia_ace` protobuf stubs — MIT License (NVIDIA)
 - `grpcio` — Apache License 2.0
 - `protobuf` — BSD 3-Clause License
+- ICT-FaceKit face model — MIT License (USC Institute for Creative Technologies)
 
 See `LICENSES/` directory for full license texts.

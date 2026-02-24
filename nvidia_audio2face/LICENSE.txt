@@ -21,3 +21,4 @@ Third-party licenses:
 - nvidia_ace protobuf stubs: MIT License (see LICENSES/MIT-nvidia-ace.txt)
 - grpcio: Apache License 2.0 (see LICENSES/Apache-2.0-grpcio.txt)
 - protobuf: BSD 3-Clause License (see LICENSES/BSD-3-protobuf.txt)
+- ICT-FaceKit face model: MIT License, Copyright (c) 2020 USC Institute for Creative Technologies (see LICENSES/MIT-ict-facekit.txt)
