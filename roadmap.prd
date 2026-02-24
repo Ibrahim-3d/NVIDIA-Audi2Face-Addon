@@ -19,8 +19,10 @@ including lip-sync, emotion, brows, cheeks, and jaw — directly inside Blender.
 
 ### 1.3 Target Users
 - Primary: Blender animators who need lip-sync / facial animation for characters
-- Secondary: Game developers using Blender in their pipeline
-- Tertiary: VTuber creators, indie filmmakers, virtual production artists
+- Primary: Game developers using Blender in their pipeline (batch NPC dialogue)
+- Primary: VTuber / virtual content creators ($3-7B market, 45% indie, most use Blender)
+- Secondary: Indie filmmakers, virtual production artists, arch-viz
+- Funnel: Hobbyists and learners (free tier → paid conversion)
 
 ### 1.4 User Personas
 
@@ -923,30 +925,49 @@ Tasks:
 
 ---
 
-### Milestone 6: "Growth" — Post-Launch (v1.1+)
-Priority: LOW | Future
+### Milestone 6: "Offline & Scale" — Local SDK + Batch (v1.1)
+Priority: HIGH | De-risks NVIDIA dependency + unlocks studio revenue
 
 Tasks:
-  6.1  Batch processing mode
-       - Select folder of WAV files → generate all, export CSV per file
+  6.1  Local C++ SDK backend
+       - ctypes wrapper for libaudio2x.so / audio2x.dll
+       - Model download from HuggingFace (open-sourced ONNX-TRT, ~2-5 GB)
+       - TensorRT engine building
+       - Requires: RTX 30xx/40xx, ~3-4 GB VRAM
+       - **This is the paid tier's key selling point** — no internet, no API key, faster
+       - NOTE: Elevated from "stretch goal" because NVIDIA open-sourced everything in late 2025
 
-  6.2  NLA strip support
+  6.2  Batch processing mode
+       - Select folder of WAV files → generate all, export CSV per file
+       - **This is the feature that converts indie users into studio purchasers**
+       - Enables "Studio" pricing tier ($79-99)
+
+  6.3  NLA strip support
        - Push generated animation to NLA strip for layering
 
-  6.3  Audio playback sync in viewport
+  6.4  Audio playback sync in viewport
        - Play audio while previewing animation
 
-  6.4  Local C++ SDK backend
-       - ctypes wrapper for libaudio2x.so / audio2x.dll
-       - Model download from HuggingFace
-       - TensorRT engine building
+### Milestone 7: "Expand" — Post-Launch (v1.2+)
+Priority: MEDIUM | Future
 
-  6.5  v3.0 model support
+Tasks:
+  7.1  v3.0 model support
        - Multiple character identities
        - Geometry output (direct vertex positions, not just blendshapes)
 
-  6.6  Blender Extensions platform listing
+  7.2  Blender Extensions platform listing (free tier)
        - Submit to extensions.blender.org once stable
+       - Must be GPL — this is the top-of-funnel distribution play
+
+  7.3  MP3/OGG/FLAC audio support
+       - WAV-only will be the #1 user complaint
+       - Add conversion via ffmpeg subprocess or bundled decoder
+       - If can't bundle: provide clear error message with conversion instructions
+
+  7.4  Additional mapping presets
+       - Ship presets for popular character models: VRoid, MakeHuman, MB-Lab
+       - Reduces shape key mapping support burden
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1007,6 +1028,11 @@ Tasks:
 | 8 | Protobuf version conflict with other addons | Import errors | Medium | Namespace vendored stubs, lazy import grpcio |
 | 9 | NVIDIA API requires function_id that changes | Cloud mode breaks | Medium | Store function_id in preferences, document how to find it |
 | 10 | User's mesh has >10K shape keys (animation perf) | Slow keyframe insert | Low | Only animate mapped keys, batch keyframe insertion |
+| 11 | Open-source competition — NVIDIA open-sourced SDK, anyone can build competing addon | Market share loss | HIGH | Ship fast — first-mover advantage is the primary moat. Build community, tutorials, presets. Be "the" A2F Blender addon before others appear |
+| 12 | GPL licensing trap — Blender Extensions requires GPL, shared codebase may make paid version GPL too | Can't enforce proprietary license | Medium | Keep free/paid as separate codebases, or accept selling convenience/updates/support rather than code secrecy. Many successful addon devs sell GPL code |
+| 13 | WAV-only audio format complaints — users will submit MP3/OGG and be frustrated | Bad reviews, support burden | HIGH | Add conversion in Milestone 7, or ship clear error messages with links to free WAV converters. Address before it drowns store reviews |
+| 14 | API key support burden — "my key doesn't work" tickets for NVIDIA's infrastructure | Support time, bad reviews | Medium | Build excellent error messages ("401 means X, check Y"). Add "Test Connection" button (already planned). Invest in troubleshooting FAQ |
+| 15 | NVIDIA free cloud tier disappears or gets rate-limited | Cloud-only users lose access | Medium | Local C++ SDK mode (Milestone 6) is the hedge. Promote local mode as premium feature |
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1015,10 +1041,13 @@ Tasks:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ### 10.1 Our Addon License
-- Proprietary / commercial (sold on Blender Market / Gumroad)
-- OR GPL-3.0 if distributed on Blender Extensions platform
-  (Blender extensions require GPL-compatible license)
-- Strategy: dual license — GPL for free version, proprietary for paid features
+- **Free tier**: GPL-3.0 on Blender Extensions platform (cloud API mode only, 10s limit)
+- **Paid tier**: Proprietary on Superhive/Gumroad (adds local offline mode, unlimited audio, all models)
+- **Key distinction**: paid tier contains the local C++ SDK integration, model management,
+  and batch processing — code that is separate from the GPL free tier
+- **Pragmatic reality**: Many successful Blender addon developers sell GPL code. You're selling
+  the download, updates, support, and curation — not code secrecy. If someone re-distributes
+  your GPL code, they don't get your updates, support, or your reputation.
 
 ### 10.2 Third-Party Licenses We Must Comply With
 
