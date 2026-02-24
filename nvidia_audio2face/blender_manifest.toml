@@ -19,11 +19,11 @@ license = ["SPDX:GPL-3.0-or-later"]
 network = "Connect to NVIDIA Audio2Face-3D service for AI facial animation generation"
 files = "Read audio WAV files and export animation CSV data"
 
-# wheels = [
-#     "./wheels/grpcio-1.64.1-cp311-cp311-manylinux_2_17_x86_64.whl",
-#     "./wheels/grpcio-1.64.1-cp311-cp311-win_amd64.whl",
-#     "./wheels/grpcio-1.64.1-cp311-cp311-macosx_10_9_universal2.whl",
-#     "./wheels/protobuf-5.27.0-cp311-cp311-manylinux2014_x86_64.whl",
-#     "./wheels/protobuf-5.27.0-cp311-cp311-win_amd64.whl",
-#     "./wheels/protobuf-5.27.0-cp311-cp311-macosx_10_9_universal2.whl",
-# ]
+wheels = [
+    "./wheels/grpcio-1.64.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "./wheels/grpcio-1.64.1-cp311-cp311-win_amd64.whl",
+    "./wheels/grpcio-1.64.1-cp311-cp311-macosx_10_9_universal2.whl",
+    "./wheels/protobuf-5.27.0-cp38-abi3-manylinux2014_x86_64.whl",
+    "./wheels/protobuf-5.27.0-cp310-abi3-win_amd64.whl",
+    "./wheels/protobuf-5.27.0-cp38-abi3-macosx_10_9_universal2.whl",
+]
