@@ -56,11 +56,15 @@ based on HuBERT with ~180M parameters.
 - Requires: Docker + NVIDIA GPU on server
 - Deploy via: `docker-compose.yml` from Audio2Face-3D-Samples
 
-#### Mode 3: Local C++ SDK (Stretch Goal — Fully Offline)
+#### Mode 3: Local C++ SDK (Priority — Fully Offline)
 - Library: `libaudio2x.so` / `audio2x.dll`
 - Interface: ctypes wrapper around C API
-- Requires: NVIDIA GPU + CUDA + TensorRT + model files from HuggingFace
+- Requires: NVIDIA GPU (RTX 30xx/40xx, ~3-4 GB VRAM) + CUDA + TensorRT
+- Models: open-sourced ONNX-TRT weights from HuggingFace (~2-5 GB download)
 - Models stored locally, no network needed
+- **NOTE**: NVIDIA open-sourced all models and SDK in late 2025. This is no longer
+  a stretch goal — it is the primary path to de-risking the NVIDIA cloud dependency
+  and becomes the paid tier's key selling point ("fully offline, no API key needed").
 
 ### gRPC Protocol (Exact Specification)
 
@@ -287,26 +291,77 @@ nvidia_audio2face/
 
 ## 6. Competitive Analysis
 
+#### Blender Addons (Direct Competitors)
+
 | Addon | Tech | Animates | Quality | Price | Our Advantage |
 |-------|------|----------|---------|-------|---------------|
 | Syncnix | Phoneme rules | Lips only | Basic | ~$30 | Full face + AI quality |
+| Parrot Lipsync | Allosaurus phonemes | Lips only | Basic-Decent | Free | Full face + emotion + no CLI |
 | iocgpoly Lip Sync | Vosk ASR | Lips only | Decent | Free | Full face + emotion |
-| Rhubarb Lipsync | CLI phonemes | Lips only | Basic | Free | No CLI, full face |
-| Faceit | MoCap + ARKit | Full face | Good | ~$40 | No iPhone needed |
-| **Ours** | NVIDIA A2F-3D | Full face | AAA | $29–49 | Neural network, emotion |
+| Rhubarb Lipsync | CLI phonemes | Lips only | Basic | Free (abandoned) | No CLI, full face, maintained |
+| Faceit | MoCap + ARKit | Full face | Good | ~$40 | No iPhone/webcam needed |
+| **Ours** | NVIDIA A2F-3D | Full face | AAA | $29 | Neural network, emotion, 30+ languages |
+
+**Key insight**: Every existing Blender lip sync addon is either rules-based (low
+quality) or lips-only (no eyebrows, cheeks, emotions). We are the only addon that
+provides full-face AI animation from audio alone.
+
+#### Non-Blender Tools (Indirect Competitors)
+
+| Tool | Input | Price | Why We Still Win |
+|------|-------|-------|-----------------|
+| Faceware Studio | Webcam/video | $239/yr (indie) – $2,340/yr | We're 8x cheaper, audio-only (no camera) |
+| iClone + A2F | Video + audio | $199/yr or $599 perpetual | Not in Blender, ecosystem lock-in |
+| MetaHuman Animator | Single camera video | Free (UE5 only) | Not in Blender, requires video |
+| Rokoko | iPhone/headcam | $195-$495 hardware + $50/mo | Audio-only, no hardware needed |
+
+#### Unique Differentiator: Multilingual
+Audio2Face works with **30+ languages** out of the box. Every competing Blender
+lip sync addon is English-only or limited to a few languages. The Japanese, Korean,
+Chinese, and Brazilian Blender communities are massive and completely underserved.
 
 ---
 
 ## 7. Commercial Strategy
 
-### Pricing
-- **Blender Extensions**: Free basic version (limited to 10s audio, James model only)
-- **Superhive / Gumroad**: $29–49 full version (unlimited, all models, emotion controls)
+### Pricing (Concrete Tiers)
+
+| Tier | Price | What's Included | Distribution |
+|------|-------|----------------|-------------|
+| **Free** | $0 | Cloud API mode (BYOK key), 10s audio limit, James model only | Blender Extensions (GPL) |
+| **Standard** | $29 (launch), $39 (after 3 months) | Cloud + Local offline mode, unlimited audio, all models, emotions | Superhive / Gumroad |
+| **Studio** (v1.1+) | $79–99 | Standard + batch processing (folder of WAVs), NLA strip support | Superhive / Gumroad |
+
+**Flipped model insight**: The local offline version is the *paid* tier, not the
+cloud version. Users pay for: no API key hassle, no internet required, faster
+inference, zero dependency on NVIDIA's cloud. The cloud version (free tier) is the
+trial funnel — zero cost to us, zero cost to NVIDIA.
 
 ### Revenue Model
-- User buys addon once → user gets own NVIDIA API key (free at build.nvidia.com)
-- Zero server costs for us — NVIDIA bears compute
-- No subscriptions, no recurring costs for users (beyond API credits)
+- **Zero server costs** — free tier uses user's own NVIDIA API key, paid tier runs locally on user's GPU
+- One-time purchase, no subscriptions
+- No ongoing infrastructure to maintain
+- Conservative estimate: $70K/year at 200 units/month × $29
+
+### Go-to-Market (Time-Sensitive)
+
+NVIDIA open-sourced the Audio2Face SDK in late 2025. Competitors can now build the
+same addon. First-mover advantage is the primary moat. Speed to market is critical.
+
+**Pre-launch (before code is polished):**
+1. Record a 30-second before/after demo video (static character → talking face)
+2. Apply to NVIDIA Inception program — we promote their tech to millions of Blender users
+3. Post demo on Blender Artists forum, Twitter/X, Reddit r/blender
+
+**Launch week:**
+4. Ship free tier on Blender Extensions (built-in discovery for millions of users)
+5. Ship paid tier on Superhive at $29 "early bird"
+6. Give free copies to 5 Blender YouTubers (target 50K-200K subscriber channels)
+
+**Post-launch:**
+7. Market multilingual capability in non-English Blender communities (Japan, Korea, Brazil, China)
+8. Create tutorial: "Animate your VRM/VRChat avatar in 60 seconds"
+9. Create tutorial: "Batch animate game dialogue for Unity/Unreal export"
 
 ### NVIDIA Partnership Path
 1. Build quality addon → post on NVIDIA Audio2Face Discord
