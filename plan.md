@@ -1,258 +1,337 @@
-# NVIDIA Audio2Face-3D Blender Addon — Commercial Product Plan
+# NVIDIA Audio2Face-3D Blender Addon — Master Plan
 
-## Why This Addon Has a Market
+## Executive Summary
 
-### Competitive Landscape
-| Existing Addon | Tech | Quality | Price |
-|---------------|------|---------|-------|
-| Syncnix | Phoneme mapping | Basic lip-only | Paid (~$20-40) |
-| iocgpoly Lip Sync | Vosk speech recognition | Decent lip-only | Free |
-| Rhubarb Lipsync | CLI phoneme tool | Basic lip-only | Free |
-| Parrot Lipsync | Phoneme JSON tables | Basic lip-only | Free |
-
-### Our Advantage: NVIDIA Audio2Face-3D
-- **Neural network** vs rule-based phoneme mapping — far superior quality
-- **Full face animation**: brows, cheeks, squints, nose, jaw — not just lips
-- **Emotion detection**: automatically detects and expresses emotion from speech
-- **52 ARKit blendshapes** at 30 FPS — industry standard, compatible with everything
-- **Available models**: James, Claire, Mark — different animation styles
-
-### Target Customer
-Blender artists and small studios who want AAA-quality facial animation
-without learning complex pipelines. People currently paying for Syncnix
-or struggling with Rhubarb's mediocre output.
+Build a commercial Blender addon that brings NVIDIA's Audio2Face-3D AI-powered facial
+animation directly into Blender. The addon converts speech audio into 52 ARKit blendshape
+weights at 30 FPS — generating full-face animation (lips, jaw, brows, cheeks, nose, eyes)
+with automatic emotion detection. This fills the biggest gap in NVIDIA's Audio2Face-3D
+ecosystem: Maya and Unreal Engine have official plugins, **Blender has nothing**.
 
 ---
 
-## Product Architecture (Ship-First Approach)
+## 1. Technology Overview
 
-### Core Principle: NVIDIA Cloud API as Primary Backend
-Users get a **free** NVIDIA API key at build.nvidia.com (1,000+ credits).
-They paste it into addon preferences. That's it — zero infrastructure.
+### What is Audio2Face-3D?
+NVIDIA's open-source (MIT license, Oct 2025) deep learning system that transforms audio
+input into highly detailed facial animations. It uses a Transformer + Diffusion architecture
+based on HuBERT with ~180M parameters.
 
-The gRPC call goes to `grpc.nvcf.nvidia.com:443` (NVIDIA's hosted endpoint).
-No Docker. No local GPU requirement. No SDK builds.
+### What it outputs
+- **52 ARKit blendshape weights** per frame at 30 FPS
+- **Emotion data** (amazement, anger, cheekiness, disgust, fear, grief, joy, outofbreath, pain, sadness)
+- **Processed audio** (echo-back for sync verification)
 
-### Connection Modes (in priority order)
-1. **NVIDIA Cloud API** (default) — just an API key, works everywhere
-2. **Local NIM Server** — for studios running their own Docker container
-3. **Local C++ SDK** — stretch goal for fully offline use
+### What it does NOT animate
+- Eye look-direction (EyeLookDown/In/Out/Up) — always 0
+- TongueOut — always 0
+- Head rotation / body movement
 
-### Minimal File Structure (v1.0 — ship fast)
-```
-nvidia_audio2face/
-├── __init__.py               # bl_info + register/unregister
-├── blender_manifest.toml     # Blender 4.2+ extension metadata
-├── constants.py              # 52 ARKit blendshape names, emotion names, defaults
-├── properties.py             # All scene + object property groups
-├── preferences.py            # Addon prefs: API key, server URL, defaults
-├── operators.py              # All operators in one file (generate, bake, setup, preview)
-├── panels.py                 # All UI panels in one file
-├── core/
-│   ├── __init__.py
-│   ├── client.py             # gRPC client (cloud + local server)
-│   ├── audio.py              # Audio loading, validation, resampling
-│   ├── mapping.py            # ARKit ↔ shape key mapping + presets
-│   └── animation.py          # Apply blendshape weights, bake keyframes
-└── wheels/                   # Bundled: grpcio, protobuf, nvidia-ace protos
-```
-
-**10 files, not 20+.** Ship it, then refactor.
+### Available models
+| Model | Best For | Notes |
+|-------|----------|-------|
+| Audio2Face-3D v3.0 | Best overall quality | Diffusion-based, multiple identities |
+| A2F v2.3-James | English male voice, strong emotion | Lower VRAM, regression-based |
+| A2F v2.3-Claire | Chinese + English female voice | Lower VRAM |
+| A2F v2.3-Mark | English male, high-res geometry | Lower VRAM |
+| Audio2Emotion v3.0 | Emotion detection | Experimental |
+| Audio2Emotion v2.2 | Emotion detection | Stable |
 
 ---
 
-## Implementation Plan
+## 2. Integration Architecture
 
-### Phase 1: Skeleton + API Connection (the hard part first)
-1. **Create addon skeleton** — `__init__.py` with bl_info, `blender_manifest.toml`,
-   register/unregister cycle
-2. **Implement `constants.py`** — all 52 ARKit blendshape names in order, emotion
-   names (amazement, anger, cheekiness, disgust, fear, grief, joy, outofbreath,
-   pain, sadness), default multipliers from NVIDIA's james config
-3. **Implement `core/client.py`** — the gRPC client:
-   - Connect to `grpc.nvcf.nvidia.com:443` with SSL + API key auth
-   - Uses `nvidia_ace` protobuf stubs:
-     - `A2FControllerServiceStub.ProcessAudioStream()` — bidirectional streaming
-     - Send: `AudioStreamHeader` (sample rate, format, emotion params, face params,
-       blendshape multipliers) → then `AudioWithEmotion` chunks → then `EndOfAudio`
-     - Receive: `AnimationDataStreamHeader` (blendshape names) → then `AnimationData`
-       (per-frame blendshape weights at 30 FPS + timecodes) → then status
-   - Also support local server mode (insecure channel to `localhost:52000`)
-   - Return structured data: list of `{timecode, blendshapes: {name: weight}}` dicts
-4. **Implement `core/audio.py`** — load WAV files (PCM 16-bit mono), validate format,
-   resample to 16kHz if needed using scipy/numpy, chunk into 1-second buffers
-5. **Implement `preferences.py`** — addon preferences panel:
-   - NVIDIA API key (StringProperty, subtype PASSWORD)
-   - Connection mode enum (Cloud / Local Server)
-   - Local server URL (default `localhost:52000`)
-   - Function ID for cloud API
+### Connection Modes (priority order)
 
-### Phase 2: Shape Key Mapping + Animation Baking
-6. **Implement `core/mapping.py`**:
-   - Exact name matching (ARKit names are the standard)
-   - Common alias map for known rigs:
-     - MetaHuman uses ARKit names directly
-     - Ready Player Me uses ARKit names with "viseme_" prefix for some
-     - VRChat/VRM uses different names entirely
-   - Built-in presets: "ARKit (Standard)", "MetaHuman", "Ready Player Me",
-     "Custom" with manual mapping
-   - Auto-detect: scan mesh shape keys, match by name similarity
-7. **Implement `core/animation.py`**:
-   - Take animation data (list of frames with timecodes + blendshape weights)
-   - Map to mesh shape keys using the mapping
-   - Insert keyframes at correct frame numbers (convert 30 FPS → scene FPS)
-   - Support frame offset (start at frame N)
-   - Support clearing existing shape key animation before baking
-   - Linear interpolation when A2F 30 FPS ≠ scene FPS
+#### Mode 1: NVIDIA Cloud API (Default — Zero Friction)
+- Endpoint: `grpc.nvcf.nvidia.com:443`
+- Auth: `Bearer <API_KEY>` + `function-id` header metadata
+- Channel: `grpc.aio.secure_channel` with SSL + composite credentials
+- Free tier: 1,000+ credits at build.nvidia.com
+- No local GPU required, no Docker, no SDK build
 
-### Phase 3: Properties + Operators (the product UX)
-8. **Implement `properties.py`** — scene property group:
-   - `audio_file`: StringProperty (FILE_PATH subtype, filter `*.wav`)
-   - `target_mesh`: PointerProperty (Object, poll for MESH type)
-   - `model`: EnumProperty — James / Claire / Mark
-   - `connection_mode`: EnumProperty — Cloud API / Local Server
-   - `frame_start`: IntProperty — where to place animation on timeline
-   - `emotion_joy`, `emotion_anger`, etc.: FloatProperty (0.0–1.0) for manual emotion
-   - `auto_emotion`: BoolProperty — let A2E detect emotion from audio
-   - `is_generating`: BoolProperty — tracks async generation state
-   - `mapping_preset`: EnumProperty — ARKit / MetaHuman / RPM / Custom
-9. **Implement operators in `operators.py`**:
-   - **`A2F_OT_generate`**: Main operator
-     - Validate: audio file exists, target mesh selected, API key set
-     - Load + validate audio
-     - Spin up thread → call gRPC client → collect results
-     - Use `bpy.app.timers` to poll thread completion
-     - On completion: auto-bake to keyframes
-   - **`A2F_OT_setup_shapekeys`**: Create all 52 ARKit shape keys on mesh
-   - **`A2F_OT_auto_map`**: Auto-detect and map existing shape keys
-   - **`A2F_OT_test_connection`**: Health check / connectivity test
-   - **`A2F_OT_clear_animation`**: Remove generated keyframes
-   - **`A2F_OT_preview`**: Modal operator — play audio + scrub shape keys in viewport
+#### Mode 2: Local NIM Server (Studios)
+- Endpoint: `localhost:52000` (configurable)
+- Channel: `grpc.aio.insecure_channel` (or TLS/mTLS)
+- Requires: Docker + NVIDIA GPU on server
+- Deploy via: `docker-compose.yml` from Audio2Face-3D-Samples
 
-### Phase 4: UI Panels (one clean N-panel)
-10. **Implement `panels.py`** — single N-Panel tab "Audio2Face":
-    - **Main section**:
-      - Audio file path selector (with waveform icon)
-      - Target mesh selector (eyedropper)
-      - Model selector (James/Claire/Mark)
-      - Big "Generate Animation" button (with spinner when generating)
-    - **Emotion section** (collapsible):
-      - "Auto-detect emotion" toggle
-      - Manual emotion sliders (joy, anger, sadness, etc.)
-    - **Shape Keys section** (collapsible):
-      - Mapping preset dropdown
-      - "Setup Shape Keys" button (creates missing ones)
-      - "Auto-Map" button
-      - Status: "42/52 mapped" indicator
-    - **Settings section** (collapsible):
-      - Connection mode
-      - Test connection button with status indicator
-      - Frame offset
-      - "Clear Animation" button
+#### Mode 3: Local C++ SDK (Stretch Goal — Fully Offline)
+- Library: `libaudio2x.so` / `audio2x.dll`
+- Interface: ctypes wrapper around C API
+- Requires: NVIDIA GPU + CUDA + TensorRT + model files from HuggingFace
+- Models stored locally, no network needed
 
-### Phase 5: Polish for Release
-11. **Bundle Python wheels** — grpcio, protobuf, nvidia-ace proto stubs
-    packaged in `wheels/` directory, installed on addon enable
-12. **Error handling UX**:
-    - No API key → friendly message with link to build.nvidia.com
-    - Bad audio format → specific error ("Audio must be WAV, PCM 16-bit, mono")
-    - Network failure → retry with backoff, user-facing error
-    - No shape keys → offer to create them automatically
-13. **Edge cases**:
-    - Very long audio (>5 min) → warn user about credit usage
-    - No mesh selected → disable generate button
-    - Shape keys already have animation → ask before overwriting
+### gRPC Protocol (Exact Specification)
+
+**Service**: `nvidia_ace.services.a2f_controller.v1.A2FControllerService`
+**Method**: `ProcessAudioStream` (bidirectional streaming)
+
+#### SEND sequence (client → server):
+```
+Message 1: AudioStream(
+  audio_stream_header=AudioStreamHeader(
+    audio_header=AudioHeader(
+      samples_per_second=16000,
+      bits_per_sample=16,
+      channel_count=1,
+      audio_format=AUDIO_FORMAT_PCM
+    ),
+    emotion_post_processing_params=EmotionPostProcessingParameters(
+      emotion_contrast=1.0,
+      live_blend_coef=0.7,
+      enable_preferred_emotion=False,
+      preferred_emotion_strength=0.5,
+      emotion_strength=0.6,
+      max_emotions=3
+    ),
+    face_params=FaceParameters(float_params={
+      "upperFaceStrength": 1.0,
+      "upperFaceSmoothing": 0.001,
+      "lowerFaceStrength": 1.2,
+      "lowerFaceSmoothing": 0.006,
+      "faceMaskLevel": 0.6,
+      "faceMaskSoftness": 0.0085,
+      "skinStrength": 1.0,
+      "eyelidOpenOffset": 0.06,
+      "lipOpenOffset": -0.02
+    }),
+    blendshape_params=BlendShapeParameters(
+      bs_weight_multipliers={...52 entries...},
+      bs_weight_offsets={...52 entries...},
+      enable_clamping_bs_weight=False
+    ),
+    emotion_params=EmotionParameters(
+      live_transition_time=0.0001,
+      beginning_emotion={...}
+    )
+  )
+)
+
+Message 2..N: AudioStream(
+  audio_with_emotion=AudioWithEmotion(
+    audio_buffer=<1 second of PCM16 bytes>,
+    emotions=[EmotionWithTimeCode(emotion={...}, time_code=0.0)]  # first chunk only
+  )
+)
+
+Message N+1: AudioStream(end_of_audio=EndOfAudio())
+```
+
+#### RECEIVE sequence (server → client):
+```
+Message 1: AnimationDataStream(
+  animation_data_stream_header=AnimationDataStreamHeader(
+    skel_animation_header.blend_shapes=["EyeBlinkLeft", "EyeLookDownLeft", ...],
+    audio_header=AudioHeader(...)
+  )
+)
+
+Message 2..M: AnimationDataStream(
+  animation_data=AnimationData(
+    skel_animation.blend_shape_weights=[
+      {time_code: 0.0, values: [0.0, 0.0, ...]},
+      {time_code: 0.033, values: [0.01, 0.0, ...]},
+      ...
+    ],
+    metadata["emotion_aggregate"]=EmotionAggregate(...),
+    audio.audio_buffer=<bytes>
+  )
+)
+
+Message M+1: AnimationDataStream(
+  status=Status(code=0, message="SUCCESS")
+)
+```
+
+#### Status codes:
+- 0 = SUCCESS
+- 1 = INFO
+- 2 = WARNING
+- 3 = ERROR
+
+### Protobuf Stubs Source
+The Maya-ACE repo (`github.com/NVIDIA/Maya-ACE`) ships pre-compiled Python protobuf
+stubs at `python/grpc_py/nvidia_ace/`. These are MIT-licensed and include:
+
+```
+nvidia_ace/
+├── a2f/v1_pb2.py                           # AudioWithEmotion, FaceParameters, BlendShapeParameters
+├── audio/v1_pb2.py                         # AudioHeader
+├── controller/v1_pb2.py                    # AudioStream, AudioStreamHeader, AnimationDataStream
+├── animation_data/v1_pb2.py                # AnimationData, AnimationDataStreamHeader
+├── emotion_with_timecode/v1_pb2.py         # EmotionWithTimeCode
+├── emotion_aggregate/v1_pb2.py             # EmotionAggregate
+├── status/v1_pb2.py                        # Status
+└── services/a2f_controller/v1_pb2_grpc.py  # A2FControllerServiceStub
+```
+
+We bundle these directly instead of depending on `nvidia-audio2face-3d` from PyPI.
 
 ---
 
-## Key Technical Details
+## 3. The 52 ARKit Blendshapes
 
-### gRPC Protocol (from NVIDIA's actual sample code)
-```
-Service: A2FControllerServiceStub
-Method:  ProcessAudioStream (bidirectional streaming)
+Ordered exactly as NVIDIA's config files define them:
 
-SEND sequence:
-  1. AudioStream(audio_stream_header=AudioStreamHeader(
-       audio_header=AudioHeader(samples_per_second, bits_per_sample=16, channel_count=1),
-       emotion_post_processing_params=EmotionPostProcessingParameters(...),
-       face_params=FaceParameters(float_params={...}),
-       blendshape_params=BlendShapeParameters(bs_weight_multipliers={...}, bs_weight_offsets={...})
-     ))
-  2. AudioStream(audio_with_emotion=AudioWithEmotion(
-       audio_buffer=<bytes>, emotions=[EmotionWithTimeCode(...)]
-     ))  # repeated for each chunk
-  3. AudioStream(end_of_audio=EndOfAudio())
-
-RECEIVE sequence:
-  1. animation_data_stream_header → skel_animation_header.blend_shapes (list of names)
-  2. animation_data → skel_animation.blend_shape_weights (list of {time_code, values[]})
-     + metadata["emotion_aggregate"] (emotion data)
-     + audio.audio_buffer (processed audio)
-  3. status → code (0=SUCCESS, 3=ERROR) + message
 ```
-
-### Cloud API Authentication
-```
-Endpoint: grpc.nvcf.nvidia.com:443
-Metadata: [("function-id", "<function-id>"), ("authorization", "Bearer <api-key>")]
-Channel:  grpc.aio.secure_channel with SSL + metadata credentials
-```
-
-### Threading Strategy (Blender-safe)
-```
-Main thread:   operator.execute() → start Thread → register timer
-Worker thread: asyncio.run(grpc_call) → store results in shared list
-Timer (0.1s):  check if thread done → if yes, apply keyframes on main thread
+ 0  EyeBlinkLeft        26  MouthFrownLeft
+ 1  EyeLookDownLeft      27  MouthFrownRight
+ 2  EyeLookInLeft        28  MouthDimpleLeft
+ 3  EyeLookOutLeft       29  MouthDimpleRight
+ 4  EyeLookUpLeft        30  MouthStretchLeft
+ 5  EyeSquintLeft        31  MouthStretchRight
+ 6  EyeWideLeft          32  MouthRollLower
+ 7  EyeBlinkRight        33  MouthRollUpper
+ 8  EyeLookDownRight     34  MouthShrugLower
+ 9  EyeLookInRight       35  MouthShrugUpper
+10  EyeLookOutRight      36  MouthPressLeft
+11  EyeLookUpRight       37  MouthPressRight
+12  EyeSquintRight       38  MouthLowerDownLeft
+13  EyeWideRight         39  MouthLowerDownRight
+14  JawForward           40  MouthUpperUpLeft
+15  JawLeft              41  MouthUpperUpRight
+16  JawRight             42  BrowDownLeft
+17  JawOpen              43  BrowDownRight
+18  MouthClose           44  BrowInnerUp
+19  MouthFunnel          45  BrowOuterUpLeft
+20  MouthPucker          46  BrowOuterUpRight
+21  MouthLeft            47  CheekPuff
+22  MouthRight           48  CheekSquintLeft
+23  MouthSmileLeft       49  CheekSquintRight
+24  MouthSmileRight      50  NoseSneerLeft
+25  MouthFrownLeft       51  NoseSneerRight
+                          (52  TongueOut — always 0)
 ```
 
-### Dependencies (bundled as wheels)
-- `grpcio` (~3MB) — gRPC runtime
-- `protobuf` (~400KB) — protobuf runtime
-- `nvidia-ace` protos — A2F service stubs (generated from .proto files)
-- `scipy` (~30MB) — for audio resampling (or use numpy-only approach to avoid this)
-- `numpy` — already bundled with Blender
-- `pyyaml` — for config files (already bundled with Blender)
+Note: `MouthClose` deviates from standard ARKit — it includes jaw opening.
+
+### Default Weight Multipliers (James model)
+Zeroed: EyeLookDown/In/Out/Up (both sides), TongueOut
+Reduced: JawLeft/Right (0.2), MouthLeft/Right (0.2), MouthStretchLeft/Right (0.05), CheekPuff (0.2)
+Boosted: MouthSmileLeft/Right (1.2), BrowDownLeft/Right (1.2), BrowInnerUp (1.3), LowerFaceStrength (1.2)
+
+---
+
+## 4. Blender-Specific Technical Constraints
+
+### Threading Model
+- Blender does NOT allow bpy calls from threads — will crash
+- gRPC client (asyncio) must run in a background `threading.Thread`
+- Results stored in a thread-safe `queue.Queue` or shared list
+- `bpy.app.timers.register()` callback polls results every 0.1s
+- Timer applies blendshape keyframes on the main thread
+- Progress reported via `context.window_manager.progress_begin/update/end`
+
+### Shape Key System
+- Shape keys are stored on `mesh.shape_keys.key_blocks`
+- `key_blocks[0]` is always "Basis" (reference shape)
+- Each ARKit shape = one key_block with `value` 0.0–1.0
+- Keyframes inserted via `key_block.keyframe_insert(data_path="value", frame=N)`
+- For 52 shapes × 30 FPS × 10s = 15,600 keyframes per clip
+
+### Frame Rate Conversion
+- A2F outputs at exactly 30 FPS (timecode 0.0, 0.033, 0.066, ...)
+- Blender scene may be 24/25/30/60 FPS
+- When scene FPS ≠ 30: interpolate between nearest A2F frames
+- Formula: `blender_frame = a2f_timecode * scene_fps + frame_offset`
 
 ### Audio Requirements
 - Format: WAV, PCM 16-bit
-- Channels: Mono (stereo auto-converted)
-- Sample rate: 16kHz (auto-resampled)
+- Channels: Mono (auto-convert stereo by averaging channels)
+- Sample rate: 16kHz preferred (auto-resample from any rate)
 - Max duration: 300 seconds per clip
-- Chunk size: ~1 second per gRPC buffer
+- Chunk size: 1 second per gRPC buffer (= samplerate samples per chunk)
+
+### Blender Version Support
+- Primary target: Blender 4.2+ (Extension system with `blender_manifest.toml`)
+- Include `bl_info` for backwards compatibility with 3.6+
+- Use `blender_manifest.toml` `[permissions]` to declare `network` and `files`
+- Bundle wheels in `wheels/` directory for dependency management
 
 ---
 
-## Pricing & Distribution Strategy
+## 5. Addon File Structure
 
-| Channel | Price | Notes |
-|---------|-------|-------|
-| Blender Extensions | Free / Freemium | Visibility, requires Blender 4.2+ |
-| Superhive (Blender Market) | $29-$49 | Primary revenue, supports all Blender versions |
-| Gumroad | $29-$49 | Alternative storefront |
-| GitHub | Open core | Free basic version, paid pro features |
-
-### Freemium Model (Recommended)
-- **Free tier**: Generate animation with watermark/limit (e.g., max 10s audio, James model only)
-- **Paid tier**: Unlimited duration, all models, emotion controls, mapping presets, priority support
-
-### Users bring their own API key
-The addon does NOT proxy through your servers. Users get their own NVIDIA API key
-(free at build.nvidia.com). This means:
-- Zero server costs for you
-- No API key management
-- No rate limiting headaches
-- NVIDIA bears the compute cost
+```
+nvidia_audio2face/
+├── __init__.py                  # bl_info + register/unregister + reload support
+├── blender_manifest.toml        # Blender 4.2+ extension manifest
+├── constants.py                 # 52 ARKit names, emotions, default multipliers/offsets
+├── properties.py                # Scene PropertyGroup (all addon state)
+├── preferences.py               # AddonPreferences (API key, server URL, defaults)
+├── operators.py                 # All operators (generate, bake, setup, preview, clear, test)
+├── panels.py                    # All UI panels (main, emotion, mapping, settings)
+├── core/
+│   ├── __init__.py
+│   ├── client.py                # gRPC client (cloud + local, asyncio in thread)
+│   ├── audio.py                 # Load WAV, validate, resample, chunk
+│   ├── mapping.py               # ARKit ↔ shape key mapping + presets
+│   └── animation.py             # Apply weights to shape keys, bake keyframes, FPS convert
+├── vendor/
+│   └── nvidia_ace/              # Bundled protobuf stubs from Maya-ACE (MIT licensed)
+│       ├── a2f/v1_pb2.py
+│       ├── audio/v1_pb2.py
+│       ├── controller/v1_pb2.py
+│       ├── animation_data/v1_pb2.py
+│       ├── emotion_with_timecode/v1_pb2.py
+│       ├── emotion_aggregate/v1_pb2.py
+│       ├── status/v1_pb2.py
+│       └── services/a2f_controller/v1_pb2_grpc.py
+└── wheels/                      # Bundled Python wheels
+    ├── grpcio-1.64.1-*.whl
+    └── protobuf-5.*.whl
+```
 
 ---
 
-## Risks & Mitigations
+## 6. Competitive Analysis
 
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| NVIDIA free credits run out | Users can't generate | Clear messaging about credit limits, support local server |
-| NVIDIA deprecates/changes API | Addon breaks | Pin to specific NIM version, monitor NVIDIA releases |
-| grpcio wheel incompatible with Blender Python | Won't install | Test across Blender 4.2-4.4, bundle multiple wheel versions |
-| scipy too large to bundle | Extension too big | Use numpy-only resampling (linear interpolation), skip scipy |
-| Users don't have ARKit shape keys | Nothing to animate | One-click "Create Shape Keys" button + auto-setup |
-| Cloud latency too slow | Bad UX | Show progress bar, process in background, cache results |
+| Addon | Tech | Animates | Quality | Price | Our Advantage |
+|-------|------|----------|---------|-------|---------------|
+| Syncnix | Phoneme rules | Lips only | Basic | ~$30 | Full face + AI quality |
+| iocgpoly Lip Sync | Vosk ASR | Lips only | Decent | Free | Full face + emotion |
+| Rhubarb Lipsync | CLI phonemes | Lips only | Basic | Free | No CLI, full face |
+| Faceit | MoCap + ARKit | Full face | Good | ~$40 | No iPhone needed |
+| **Ours** | NVIDIA A2F-3D | Full face | AAA | $29–49 | Neural network, emotion |
+
+---
+
+## 7. Commercial Strategy
+
+### Pricing
+- **Blender Extensions**: Free basic version (limited to 10s audio, James model only)
+- **Superhive / Gumroad**: $29–49 full version (unlimited, all models, emotion controls)
+
+### Revenue Model
+- User buys addon once → user gets own NVIDIA API key (free at build.nvidia.com)
+- Zero server costs for us — NVIDIA bears compute
+- No subscriptions, no recurring costs for users (beyond API credits)
+
+### NVIDIA Partnership Path
+1. Build quality addon → post on NVIDIA Audio2Face Discord
+2. Join NVIDIA Developer Program (free) + NVIDIA Connect (free ISV program)
+3. Request listing on Audio2Face-3D hub repo + developer.nvidia.com/ace page
+4. Apply for NVIDIA Inception if incorporating as startup
+5. Submit GTC session proposal
+
+---
+
+## 8. Key References
+
+### NVIDIA Repositories
+- Hub: https://github.com/NVIDIA/Audio2Face-3D
+- SDK: https://github.com/NVIDIA/Audio2Face-3D-SDK
+- Samples: https://github.com/NVIDIA/Audio2Face-3D-Samples
+- Maya Plugin: https://github.com/NVIDIA/Maya-ACE
+- Training: https://github.com/NVIDIA/Audio2Face-3D-Training-Framework
+- Models: https://huggingface.co/nvidia/Audio2Face-3D-v3.0
+
+### NVIDIA Documentation
+- Microservice docs: https://docs.nvidia.com/ace/audio2face-3d-microservice/latest/
+- ACE page: https://developer.nvidia.com/ace
+- NIM API: https://build.nvidia.com/nvidia/audio2face-3d
+
+### Blender Documentation
+- Python API: https://docs.blender.org/api/current/
+- Extension system: https://docs.blender.org/manual/en/latest/advanced/extensions/getting_started.html
