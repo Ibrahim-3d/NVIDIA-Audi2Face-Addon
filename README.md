@@ -13,6 +13,8 @@ AI-powered facial animation from audio using NVIDIA Audio2Face-3D. Converts spee
 - **Face parameter tuning** — Upper/lower face strength, smoothing, skin strength, eyelid/lip offsets
 - **Shape key mapping** — ARKit and VRM/VRChat presets with per-blendshape multipliers
 - **Auto-create shape keys** — Automatically adds missing ARKit shape keys to any mesh
+- **Built-in demo head** — One-click procedural head with 52 ARKit blendshape deformations for instant testing
+- **Shape key transfer** — Project blendshape deformations from the demo head (or any template) onto your custom mesh
 - **CSV import/export** — NVIDIA-format CSV for interop with other tools
 - **Cloud + Local** — Use NVIDIA's free cloud API or a self-hosted NIM server
 - **Background processing** — Non-blocking generation with progress bar
@@ -50,6 +52,8 @@ AI-powered facial animation from audio using NVIDIA Audio2Face-3D. Converts spee
 ### 4. Select Target Mesh
 
 - Set **Target Mesh** to any mesh object in your scene
+- **No model yet?** Expand the **Model Setup** sub-panel and click **Load Demo Head** to instantly create a procedural head with all 52 ARKit blendshape deformations
+- **Using your own model?** Load the demo head as a template, set your mesh as the target, and click **Transfer Shape Keys** to project the blendshape deformations onto your custom mesh
 - If the mesh doesn't have ARKit shape keys, click **Create Missing** in the Shape Key Mapping panel (or enable auto-create in addon preferences)
 
 ### 5. Generate
@@ -81,6 +85,26 @@ AI-powered facial animation from audio using NVIDIA Audio2Face-3D. Converts spee
 - Set the server address (default: `localhost:52000`)
 - No API key needed
 - Requires NVIDIA GPU with NIM installed
+
+## Model Setup & Shape Key Transfer
+
+The addon needs a mesh with **ARKit shape keys that have actual vertex deformations** (not just empty shape keys) to produce visible facial animation.
+
+### Demo Head (Quick Start)
+
+Click **Load Demo Head** in the Model Setup panel to create a procedural head with all 52 ARKit blendshapes. This is the fastest way to test the addon — the deformations are built in and ready to animate.
+
+### Transfer to Custom Mesh
+
+To use your own face model:
+
+1. Click **Load Demo Head** (or import any mesh with ARKit shape key deformations)
+2. Import your custom face model into the scene
+3. In the **Model Setup** panel, set **Template Mesh** to the demo head
+4. Set **Target Mesh** to your custom model
+5. Click **Transfer Shape Keys**
+
+The addon uses surface-proximity matching (BVH tree + barycentric interpolation) to project deformations from the template onto your mesh. Works best when both meshes roughly overlap in world space — scale and position your custom mesh to approximately match the template before transferring.
 
 ## Shape Key Mapping
 

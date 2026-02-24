@@ -110,6 +110,18 @@ class A2F_PG_properties(bpy.types.PropertyGroup):
     eyelid_open_offset: FloatProperty(name="Eyelid Open Offset", default=0.06, min=-0.5, max=0.5, step=1)
     lip_open_offset: FloatProperty(name="Lip Open Offset", default=-0.02, min=-0.5, max=0.5, step=1)
 
+    # -- Template for shape key transfer --
+    template_mesh: PointerProperty(
+        name="Template Mesh",
+        description="Source mesh with ARKit shape key deformations (e.g., Demo Head) to transfer from",
+        type=bpy.types.Object,
+        poll=lambda self, obj: (
+            obj.type == 'MESH'
+            and obj.data.shape_keys is not None
+            and len(obj.data.shape_keys.key_blocks) > 1
+        ),
+    )
+
     # -- Mapping --
     mapping_preset: EnumProperty(
         name="Mapping Preset",

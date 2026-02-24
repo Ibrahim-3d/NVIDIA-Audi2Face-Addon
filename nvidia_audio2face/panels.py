@@ -57,6 +57,53 @@ class A2F_PT_main(bpy.types.Panel):
         row.operator("a2f.import_csv", text="Import CSV", icon='IMPORT')
 
 
+class A2F_PT_model_setup(bpy.types.Panel):
+    """Quick Start: demo model and shape key transfer"""
+    bl_label = "Model Setup"
+    bl_idname = "A2F_PT_model_setup"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Audio2Face"
+    bl_parent_id = "A2F_PT_main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.a2f_props
+
+        # Demo head section
+        box = layout.box()
+        box.label(text="Quick Start", icon='LIGHT')
+        col = box.column(align=True)
+        col.label(text="No face model? Create a demo head with")
+        col.label(text="52 ARKit blendshapes to get started:")
+        col.separator()
+        col.operator("a2f.load_demo_head", icon='MONKEY')
+
+        layout.separator()
+
+        # Transfer section
+        box = layout.box()
+        box.label(text="Transfer Blendshapes", icon='MOD_DATA_TRANSFER')
+        col = box.column(align=True)
+        col.label(text="Copy shape key deformations from a")
+        col.label(text="template to your custom mesh:")
+        col.separator()
+        col.prop(props, "template_mesh", icon='MESH_DATA')
+        col.prop(props, "target_mesh", text="Target", icon='OUTLINER_OB_MESH')
+        col.separator()
+        row = col.row()
+        row.scale_y = 1.3
+        row.operator("a2f.transfer_shapekeys", icon='PASTEDOWN')
+
+        # Status hint
+        if props.template_mesh and props.target_mesh:
+            if props.template_mesh == props.target_mesh:
+                col.label(text="Template and target must be different", icon='ERROR')
+            elif not props.template_mesh.data.shape_keys:
+                col.label(text="Template has no shape keys", icon='ERROR')
+
+
 class A2F_PT_emotion(bpy.types.Panel):
     """Emotion controls sub-panel"""
     bl_label = "Emotion Controls"
@@ -204,6 +251,7 @@ class A2F_PT_settings(bpy.types.Panel):
 
 _classes = (
     A2F_PT_main,
+    A2F_PT_model_setup,
     A2F_PT_emotion,
     A2F_PT_face_params,
     A2F_PT_mapping,

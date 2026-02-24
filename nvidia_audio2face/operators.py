@@ -9,7 +9,7 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import constants
-from .core import audio, client, mapping, animation
+from .core import audio, client, mapping, animation, demo_head, transfer
 
 
 # Thread-safe storage for generation state
@@ -606,6 +606,54 @@ class A2F_OT_import_csv(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+class A2F_OT_load_demo_head(bpy.types.Operator):
+    """Create a demo head with 52 ARKit blendshape deformations for testing"""
+    bl_idname = "a2f.load_demo_head"
+    bl_label = "Load Demo Head"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = demo_head.create_demo_head()
+        props = _get_props(context)
+        props.target_mesh = obj
+        props.template_mesh = obj
+
+        self.report({'INFO'}, f"Created demo head '{obj.name}' with 52 ARKit blendshapes")
+        return {'FINISHED'}
+
+
+class A2F_OT_transfer_shapekeys(bpy.types.Operator):
+    """Transfer ARKit blendshape deformations from template mesh to target mesh"""
+    bl_idname = "a2f.transfer_shapekeys"
+    bl_label = "Transfer Shape Keys"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.a2f_props
+        return (
+            props.template_mesh is not None
+            and props.target_mesh is not None
+            and props.template_mesh != props.target_mesh
+            and props.template_mesh.data.shape_keys is not None
+        )
+
+    def execute(self, context):
+        props = _get_props(context)
+
+        try:
+            count = transfer.transfer_shape_keys(
+                source_obj=props.template_mesh,
+                target_obj=props.target_mesh,
+            )
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Transferred {count} shape keys to '{props.target_mesh.name}'")
+        return {'FINISHED'}
+
+
 _classes = (
     A2F_OT_generate,
     A2F_OT_test_connection,
@@ -615,6 +663,8 @@ _classes = (
     A2F_OT_reset_face_params,
     A2F_OT_export_csv,
     A2F_OT_import_csv,
+    A2F_OT_load_demo_head,
+    A2F_OT_transfer_shapekeys,
 )
 
 

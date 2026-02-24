@@ -24,6 +24,14 @@ if "constants" in locals():
     importlib.reload(preferences)
     importlib.reload(operators)
     importlib.reload(panels)
+    # Reload core submodules (imported by operators)
+    from .core import audio, client, mapping, animation, demo_head, transfer
+    importlib.reload(audio)
+    importlib.reload(client)
+    importlib.reload(mapping)
+    importlib.reload(animation)
+    importlib.reload(demo_head)
+    importlib.reload(transfer)
 
 from . import constants
 from . import properties
