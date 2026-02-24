@@ -17,6 +17,14 @@ _vendor_path = os.path.join(os.path.dirname(__file__), "vendor")
 if _vendor_path not in sys.path:
     sys.path.insert(0, _vendor_path)
 
+# Support reload (F8 in Blender)
+if "constants" in locals():
+    importlib.reload(constants)
+    importlib.reload(properties)
+    importlib.reload(preferences)
+    importlib.reload(operators)
+    importlib.reload(panels)
+
 from . import constants
 from . import properties
 from . import preferences
