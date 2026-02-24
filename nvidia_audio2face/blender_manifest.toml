@@ -1,0 +1,29 @@
+schema_version = "1.0.0"
+
+id = "nvidia_audio2face"
+version = "1.0.0"
+name = "Audio2Face for Blender"
+tagline = "AI-powered facial animation from audio using NVIDIA Audio2Face-3D"
+maintainer = "Ibrahim"
+type = "add-on"
+
+website = ""
+
+tags = ["Animation", "Rigging"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Connect to NVIDIA Audio2Face-3D service for AI facial animation generation"
+files = "Read audio WAV files and export animation CSV data"
+
+# wheels = [
+#     "./wheels/grpcio-1.64.1-cp311-cp311-manylinux_2_17_x86_64.whl",
+#     "./wheels/grpcio-1.64.1-cp311-cp311-win_amd64.whl",
+#     "./wheels/grpcio-1.64.1-cp311-cp311-macosx_10_9_universal2.whl",
+#     "./wheels/protobuf-5.27.0-cp311-cp311-manylinux2014_x86_64.whl",
+#     "./wheels/protobuf-5.27.0-cp311-cp311-win_amd64.whl",
+#     "./wheels/protobuf-5.27.0-cp311-cp311-macosx_10_9_universal2.whl",
+# ]
