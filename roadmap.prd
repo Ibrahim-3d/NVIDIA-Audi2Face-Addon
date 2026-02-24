@@ -1,0 +1,1068 @@
+# Audio2Face-3D Blender Addon — Product Requirements Document & Roadmap
+# Version: 1.0 | Date: 2026-02-24
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 1: PRODUCT DEFINITION
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 1.1 Product Name
+Audio2Face for Blender (working title)
+- Internal codename: "a2f-blender"
+- Blender extension ID: "nvidia_audio2face"
+- bl_idname prefix: "A2F"
+
+### 1.2 One-Line Description
+AI-powered facial animation from audio — full 52-blendshape face performance
+including lip-sync, emotion, brows, cheeks, and jaw — directly inside Blender.
+
+### 1.3 Target Users
+- Primary: Blender animators who need lip-sync / facial animation for characters
+- Secondary: Game developers using Blender in their pipeline
+- Tertiary: VTuber creators, indie filmmakers, virtual production artists
+
+### 1.4 User Personas
+
+#### Persona A: "Solo Animator"
+- Uses Blender for character animation, short films
+- Has a character with ARKit blendshapes (from Mixamo, ReadyPlayerMe, or custom)
+- Currently hand-animates lip-sync or uses Rhubarb (tedious)
+- Wants: one-click audio → facial animation
+- Tech comfort: moderate (can install addons, not comfortable with Docker/CLI)
+
+#### Persona B: "Indie Game Dev"
+- Exports from Blender to Unity/Unreal
+- Characters use ARKit blendshapes (MetaHuman-compatible)
+- Needs batch processing of dialogue lines
+- Wants: fast iteration, consistent quality across many lines
+- Tech comfort: high (comfortable with APIs, may run local NIM)
+
+#### Persona C: "VTuber / Content Creator"
+- Has a VRM/VRChat avatar with custom blendshapes
+- Needs pre-recorded facial animation for videos
+- Non-standard blendshape names (Japanese, custom naming)
+- Wants: works with their specific model, easy mapping
+- Tech comfort: low-moderate
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 2: FEATURE SPECIFICATION
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 2.1 Core Feature: Generate Animation
+
+#### 2.1.1 Operator: A2F_OT_generate
+- bl_idname: "a2f.generate"
+- bl_label: "Generate Facial Animation"
+- bl_options: {'REGISTER'}  (no UNDO — too many keyframes for undo stack)
+
+#### 2.1.2 Input Validation (execute pre-checks)
+- [ ] Audio file path is set and file exists on disk
+- [ ] Audio file is readable WAV format
+- [ ] Target mesh object is set and exists in scene
+- [ ] Target mesh has shape_keys (or auto_create_shapekeys is enabled)
+- [ ] API key is configured (for cloud mode) or server URL is reachable (local mode)
+- [ ] No other generation is already in progress (is_generating == False)
+
+#### 2.1.3 Audio Processing Pipeline
+Step 1: Load audio file
+  - Use Python `wave` module (stdlib, no extra dep) for WAV files
+  - Read: sample_rate, num_channels, sample_width, num_frames, raw_data
+  - If sample_width != 2 (16-bit): report error "Audio must be 16-bit PCM WAV"
+  - If sample_width == 2: interpret as numpy.int16 array
+
+Step 2: Convert to mono (if stereo)
+  - If num_channels == 2: average left+right channels
+    data = ((data[0::2].astype(np.int32) + data[1::2].astype(np.int32)) // 2).astype(np.int16)
+  - If num_channels > 2: report error "Only mono or stereo audio supported"
+
+Step 3: Resample to target rate
+  - A2F accepts 16kHz, 32kHz, or 48kHz (16kHz preferred)
+  - If sample_rate not in {16000, 32000, 48000}:
+    - Resample to 16000 Hz using linear interpolation (numpy only, no scipy)
+    - ratio = 16000 / original_sample_rate
+    - new_length = int(len(data) * ratio)
+    - x_old = np.linspace(0, 1, len(data))
+    - x_new = np.linspace(0, 1, new_length)
+    - data = np.interp(x_new, x_old, data).astype(np.int16)
+    - sample_rate = 16000
+
+Step 4: Validate duration
+  - duration = len(data) / sample_rate
+  - If duration > 300: report error "Audio exceeds 5 minute limit"
+  - If duration < 0.1: report error "Audio too short (minimum 0.1 seconds)"
+
+Step 5: Chunk into 1-second buffers
+  - chunks = []
+  - for i in range(len(data) // sample_rate + 1):
+      chunk = data[i * sample_rate : (i + 1) * sample_rate]
+      if len(chunk) > 0:
+          chunks.append(chunk.astype(np.int16).tobytes())
+
+#### 2.1.4 gRPC Client Architecture
+- Runs in a separate `threading.Thread` (NOT on main Blender thread)
+- Uses `asyncio.run()` inside the thread to run the async gRPC calls
+- Thread communicates results via a thread-safe shared state object:
+
+  class GenerationState:
+      status: str = "idle"          # "idle" | "connecting" | "streaming" | "receiving" | "done" | "error"
+      progress: float = 0.0         # 0.0 to 1.0
+      error_message: str = ""
+      blendshape_names: list = []
+      animation_frames: list = []   # [{timecode: float, weights: {name: float}}]
+      emotion_frames: list = []     # [{timecode: float, emotions: {name: float}}]
+
+#### 2.1.5 gRPC Send Flow (in background thread)
+1. Create channel:
+   - Cloud: grpc.aio.secure_channel("grpc.nvcf.nvidia.com:443", composite_credentials)
+     where composite_credentials = ssl_credentials + metadata_credentials
+     metadata = [("function-id", function_id), ("authorization", "Bearer " + api_key)]
+   - Local: grpc.aio.insecure_channel(f"{server_host}:{server_port}")
+
+2. Create stub: A2FControllerServiceStub(channel)
+
+3. Open bidirectional stream: stream = stub.ProcessAudioStream()
+
+4. Send AudioStreamHeader (first message):
+   - audio_header: samples_per_second, bits_per_sample=16, channel_count=1, audio_format=PCM
+   - emotion_post_processing_params: from addon properties
+   - face_params: from addon properties (or use defaults from constants.py)
+   - blendshape_params: multipliers + offsets from constants.py (per-model defaults)
+   - emotion_params: live_transition_time, beginning_emotion
+
+5. Send audio chunks:
+   - First chunk: include emotion_with_timecode list if manual emotions are set
+   - Subsequent chunks: audio_buffer only
+   - Update progress: state.progress = chunks_sent / total_chunks * 0.5
+
+6. Send EndOfAudio signal
+
+#### 2.1.6 gRPC Receive Flow (in background thread, concurrent with send)
+1. Read first message → animation_data_stream_header
+   - Extract blendshape names from skel_animation_header.blend_shapes
+   - Store in state.blendshape_names
+
+2. Read animation_data messages (loop until EOF):
+   - For each message:
+     - Extract blend_shape_weights list (each entry = {time_code, values[]})
+     - Zip with blendshape names to create {name: weight} dict
+     - Append to state.animation_frames
+     - Extract emotion_aggregate metadata
+     - Update progress: state.progress = 0.5 + (frames_received / estimated_total) * 0.5
+
+3. Read status message:
+   - code 0: state.status = "done"
+   - code 3: state.status = "error", state.error_message = status.message
+
+#### 2.1.7 Main Thread Timer (polls background thread)
+- Registered via bpy.app.timers.register(poll_generation, first_interval=0.1)
+- Every 0.1 seconds:
+  - Check state.status
+  - Update progress bar: wm.progress_update(int(state.progress * 100))
+  - If "done": apply animation, unregister timer, report success
+  - If "error": unregister timer, report error to user
+  - If running: return 0.1 (continue polling)
+
+#### 2.1.8 Apply Animation (on main thread after generation completes)
+- Get target mesh from properties
+- Get shape key mapping from mapping module
+- For each frame in state.animation_frames:
+    blender_frame = timecode * scene_fps + frame_offset
+    for bs_name, weight in frame.weights.items():
+        mapped_name = mapping.get(bs_name)
+        if mapped_name and mapped_name in mesh.shape_keys.key_blocks:
+            key_block = mesh.shape_keys.key_blocks[mapped_name]
+            key_block.value = weight
+            key_block.keyframe_insert(data_path="value", frame=blender_frame)
+- Set keyframe interpolation to LINEAR for all inserted keyframes
+- Update scene frame range if animation extends beyond current range
+
+---
+
+### 2.2 Core Feature: Shape Key Setup
+
+#### 2.2.1 Operator: A2F_OT_setup_shapekeys
+- bl_idname: "a2f.setup_shapekeys"
+- bl_label: "Create ARKit Shape Keys"
+- bl_options: {'REGISTER', 'UNDO'}
+
+#### 2.2.2 Behavior
+- Check if target mesh has any shape keys
+  - If no shape_keys at all: create Basis key first (mesh.shape_key_add(name="Basis"))
+  - For each of the 52 ARKit names:
+    - If key_block with this name already exists: skip
+    - Else: mesh.shape_key_add(name=arkit_name)
+- Report: "Created N new shape keys (M already existed)"
+
+#### 2.2.3 Poll Condition
+- context.scene.a2f_props.target_mesh is not None
+- target_mesh.type == 'MESH'
+
+---
+
+### 2.3 Core Feature: Blendshape Mapping
+
+#### 2.3.1 Mapping Strategy
+Shape key matching is done by name. The mapping module maintains:
+
+1. **Exact match** (case-insensitive): "eyeblinkleft" matches "EyeBlinkLeft"
+2. **Preset aliases** for common rigs:
+   - MetaHuman: uses ARKit names directly (exact match)
+   - ReadyPlayerMe: uses ARKit names directly
+   - VRM/VRChat: different convention:
+     - "Fcl_EYE_Close_L" → "EyeBlinkLeft"
+     - "Fcl_MTH_A" → "JawOpen"
+     - etc.
+   - Mixamo: uses ARKit names with "blendShape." prefix
+3. **Custom mapping**: user can manually assign any shape key to any ARKit name
+
+#### 2.3.2 Operator: A2F_OT_auto_map
+- bl_idname: "a2f.auto_map"
+- bl_label: "Auto-Map Shape Keys"
+- Scans all shape keys on target mesh
+- Applies selected mapping preset
+- Reports: "Mapped N/52 shape keys (M unmatched)"
+
+#### 2.3.3 Mapping Data Structure (stored in scene properties)
+- CollectionProperty of MappingItem:
+  - arkit_name: StringProperty (e.g., "EyeBlinkLeft")
+  - blender_name: StringProperty (e.g., "eyeBlinkLeft" or "" if unmapped)
+  - enabled: BoolProperty (default True)
+  - multiplier: FloatProperty (default 1.0, min 0.0, max 5.0)
+
+---
+
+### 2.4 Core Feature: Preview Playback
+
+#### 2.4.1 Operator: A2F_OT_preview
+- bl_idname: "a2f.preview"
+- bl_label: "Preview Animation"
+- bl_options: {'REGISTER'}
+- Type: Modal operator with timer
+
+#### 2.4.2 Behavior
+- Requires: animation data has been generated (state.animation_frames is not empty)
+- On invoke:
+  - Store current frame
+  - Start timer at 1/30 second interval (33.3ms)
+  - Begin playing audio in OS audio player (subprocess)
+- On timer tick:
+  - Advance to next animation frame
+  - Apply blendshape weights directly to shape key values (no keyframes)
+  - Force viewport redraw: context.area.tag_redraw()
+- On ESC / right-click:
+  - Stop audio
+  - Restore original frame and shape key values
+  - Return CANCELLED
+- On SPACE:
+  - Pause/resume
+
+---
+
+### 2.5 Core Feature: Connection Test
+
+#### 2.5.1 Operator: A2F_OT_test_connection
+- bl_idname: "a2f.test_connection"
+- bl_label: "Test Connection"
+
+#### 2.5.2 Behavior
+- Cloud mode: attempt gRPC health check to grpc.nvcf.nvidia.com:443
+  - Use HealthStub from nvidia_ace.health_pb2_grpc
+  - Send HealthCheckRequest()
+  - If response.status == SERVING: report success
+  - Timeout after 5 seconds
+- Local mode: attempt health check to configured server URL
+- Run in background thread (same timer pattern as generate)
+- Report result: "Connection successful" or "Connection failed: <details>"
+
+---
+
+### 2.6 Core Feature: Clear Animation
+
+#### 2.6.1 Operator: A2F_OT_clear_animation
+- bl_idname: "a2f.clear_animation"
+- bl_label: "Clear A2F Animation"
+- bl_options: {'REGISTER', 'UNDO'}
+
+#### 2.6.2 Behavior
+- Get target mesh
+- For each shape key that is in the ARKit mapping:
+  - If shape key has animation data (action with fcurves):
+    - Remove the fcurve for this shape key's value
+  - Reset shape key value to 0.0
+- Report: "Cleared animation from N shape keys"
+
+---
+
+### 2.7 Feature: Import/Export Animation Data
+
+#### 2.7.1 Operator: A2F_OT_export_csv
+- bl_idname: "a2f.export_csv"
+- Export animation frames to CSV matching NVIDIA's format:
+  - Columns: timeCode, blendShapes.EyeBlinkLeft, blendShapes.EyeLookDownLeft, ...
+  - One row per frame (30 rows per second of audio)
+  - Compatible with NVIDIA's `animation_frames.csv` output
+
+#### 2.7.2 Operator: A2F_OT_import_csv
+- bl_idname: "a2f.import_csv"
+- Import animation from CSV file (NVIDIA format or custom)
+- Parse columns, detect blendshape names from header
+- Apply to mesh using same animation pipeline as generate
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 3: UI SPECIFICATION
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 3.1 Panel Location
+- bl_space_type: 'VIEW_3D'
+- bl_region_type: 'UI'
+- bl_category: "Audio2Face"
+- Visible in: Object Mode
+
+### 3.2 Main Panel: A2F_PT_main
+- bl_label: "Audio2Face"
+- bl_idname: "A2F_PT_main"
+- Always visible when in 3D Viewport sidebar
+
+Layout:
+```
+┌─ Audio2Face ──────────────────────┐
+│                                    │
+│  Audio File:  [____________] [📁]  │
+│  Target Mesh: [____________] [👁]  │
+│  Model:       [James v2.3    ▼]   │
+│                                    │
+│  Frame Start: [1         ]         │
+│                                    │
+│  ┌──────────────────────────────┐  │
+│  │   ▶  Generate Animation     │  │
+│  └──────────────────────────────┘  │
+│                                    │
+│  Status: Ready                     │
+│  [▶ Preview]  [🗑 Clear]          │
+│                                    │
+└────────────────────────────────────┘
+```
+
+#### 3.2.1 Generate Button States
+- Default: "Generate Animation" (icon: PLAY)
+- While generating: "Generating... 45%" (icon: SORTTIME, enabled=False)
+- After success: "Generate Animation" with status "Last: 156 frames generated"
+- After error: "Generate Animation" with status "Error: <message>" (alert=True)
+
+### 3.3 Sub-Panel: A2F_PT_emotion
+- bl_label: "Emotion Controls"
+- bl_parent_id: "A2F_PT_main"
+- bl_options: {'DEFAULT_CLOSED'}
+
+Layout:
+```
+┌─ Emotion Controls ────────────────┐
+│                                    │
+│  [✓] Auto-Detect Emotion          │
+│                                    │
+│  Emotion Strength: [====== 0.6]   │
+│  Emotion Contrast: [====== 1.0]   │
+│  Max Emotions:     [3         ]   │
+│                                    │
+│  ── Manual Override ──             │
+│  Joy:        [========== 0.0]     │
+│  Anger:      [========== 0.0]     │
+│  Sadness:    [========== 0.0]     │
+│  Fear:       [========== 0.0]     │
+│  Amazement:  [========== 0.0]     │
+│  Disgust:    [========== 0.0]     │
+│  Cheekiness: [========== 0.0]     │
+│  Grief:      [========== 0.0]     │
+│  Pain:       [========== 0.0]     │
+│  OutOfBreath:[========== 0.0]     │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### 3.4 Sub-Panel: A2F_PT_face_params
+- bl_label: "Face Parameters"
+- bl_parent_id: "A2F_PT_main"
+- bl_options: {'DEFAULT_CLOSED'}
+
+Layout:
+```
+┌─ Face Parameters ─────────────────┐
+│                                    │
+│  Skin Strength:      [==== 1.0]   │
+│  Upper Face Strength:[==== 1.0]   │
+│  Upper Face Smooth:  [==== 0.001] │
+│  Lower Face Strength:[==== 1.2]   │
+│  Lower Face Smooth:  [==== 0.006] │
+│  Face Mask Level:    [==== 0.6]   │
+│  Face Mask Softness: [==== 0.009] │
+│  Eyelid Open Offset: [==== 0.06]  │
+│  Lip Open Offset:    [====-0.02]  │
+│                                    │
+│  [↺ Reset to Defaults]            │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### 3.5 Sub-Panel: A2F_PT_mapping
+- bl_label: "Shape Key Mapping"
+- bl_parent_id: "A2F_PT_main"
+- bl_options: {'DEFAULT_CLOSED'}
+
+Layout:
+```
+┌─ Shape Key Mapping ───────────────┐
+│                                    │
+│  Preset: [ARKit (Standard)    ▼]  │
+│                                    │
+│  [🔄 Auto-Map] [➕ Create Missing]│
+│                                    │
+│  Status: 42/52 mapped             │
+│                                    │
+│  ┌──────────────────────────────┐ │
+│  │ ARKit Name      → Blender   │ │
+│  │ EyeBlinkLeft    → eyeBlink_L│ │
+│  │ EyeSquintLeft   → (unmapped)│ │
+│  │ JawOpen         → jawOpen   │ │
+│  │ MouthSmileLeft  → smile_L   │ │
+│  │ ...                          │ │
+│  └──────────────────────────────┘ │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### 3.6 Sub-Panel: A2F_PT_settings
+- bl_label: "Connection Settings"
+- bl_parent_id: "A2F_PT_main"
+- bl_options: {'DEFAULT_CLOSED'}
+
+Layout:
+```
+┌─ Connection Settings ─────────────┐
+│                                    │
+│  Mode: (•) Cloud API  ( ) Local   │
+│                                    │
+│  ── Cloud API ──                   │
+│  API Key: [••••••••••••••••]      │
+│  [Test Connection]  ✓ Connected   │
+│                                    │
+│  ── OR Local Server ──             │
+│  Server: [localhost:52000    ]    │
+│  [Test Connection]  ⚠ Offline     │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### 3.7 Addon Preferences
+Location: Edit > Preferences > Add-ons > Audio2Face
+
+Properties:
+- api_key: StringProperty(subtype='PASSWORD')
+- function_id: StringProperty(default="<nvidia-cloud-function-id>")
+- default_server_url: StringProperty(default="localhost:52000")
+- connection_mode: EnumProperty('CLOUD', 'LOCAL')
+- auto_create_shapekeys: BoolProperty(default=True)
+- default_model: EnumProperty('james_v2.3', 'claire_v2.3', 'mark_v2.3')
+- log_level: EnumProperty('ERROR', 'WARNING', 'INFO', 'DEBUG')
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 4: PROPERTIES SPECIFICATION
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 4.1 Scene Property Group: A2F_PG_properties
+
+```python
+class A2F_PG_properties(bpy.types.PropertyGroup):
+
+    # ── Core Settings ──
+    audio_file: StringProperty(
+        name="Audio File",
+        description="Path to WAV audio file (PCM 16-bit, mono or stereo)",
+        subtype='FILE_PATH',
+        default="",
+    )
+    target_mesh: PointerProperty(
+        name="Target Mesh",
+        description="Mesh object to apply facial animation to",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'MESH',
+    )
+    model: EnumProperty(
+        name="Model",
+        description="Audio2Face-3D model to use for generation",
+        items=[
+            ('james_v2.3', "James v2.3", "English male, strong emotion expression"),
+            ('claire_v2.3', "Claire v2.3", "Chinese + English female voice"),
+            ('mark_v2.3', "Mark v2.3", "English male, high-resolution geometry"),
+        ],
+        default='james_v2.3',
+    )
+    frame_start: IntProperty(
+        name="Frame Start",
+        description="Frame number where animation begins on the timeline",
+        default=1,
+        min=0,
+    )
+
+    # ── Generation State ──
+    is_generating: BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})
+    generation_progress: FloatProperty(default=0.0, min=0.0, max=1.0, options={'HIDDEN', 'SKIP_SAVE'})
+    last_status: StringProperty(default="Ready", options={'SKIP_SAVE'})
+    last_frame_count: IntProperty(default=0, options={'SKIP_SAVE'})
+
+    # ── Connection ──
+    connection_mode: EnumProperty(
+        name="Connection Mode",
+        items=[
+            ('CLOUD', "Cloud API", "Use NVIDIA's hosted cloud API (grpc.nvcf.nvidia.com)"),
+            ('LOCAL', "Local Server", "Connect to a local or self-hosted NIM server"),
+        ],
+        default='CLOUD',
+    )
+    server_url: StringProperty(
+        name="Server URL",
+        description="Address of local Audio2Face-3D NIM server",
+        default="localhost:52000",
+    )
+
+    # ── Emotion Controls ──
+    auto_emotion: BoolProperty(
+        name="Auto-Detect Emotion",
+        description="Let Audio2Emotion detect emotion from the audio automatically",
+        default=True,
+    )
+    emotion_strength: FloatProperty(name="Emotion Strength", default=0.6, min=0.0, max=2.0, step=10)
+    emotion_contrast: FloatProperty(name="Emotion Contrast", default=1.0, min=0.0, max=3.0, step=10)
+    max_emotions: IntProperty(name="Max Emotions", default=3, min=1, max=10)
+
+    # Manual emotion overrides (0.0 = not set, passthrough to auto)
+    emotion_joy: FloatProperty(name="Joy", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_anger: FloatProperty(name="Anger", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_sadness: FloatProperty(name="Sadness", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_fear: FloatProperty(name="Fear", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_amazement: FloatProperty(name="Amazement", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_disgust: FloatProperty(name="Disgust", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_cheekiness: FloatProperty(name="Cheekiness", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_grief: FloatProperty(name="Grief", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_pain: FloatProperty(name="Pain", default=0.0, min=0.0, max=1.0, step=10)
+    emotion_outofbreath: FloatProperty(name="Out of Breath", default=0.0, min=0.0, max=1.0, step=10)
+
+    # ── Face Parameters ──
+    skin_strength: FloatProperty(name="Skin Strength", default=1.0, min=0.0, max=3.0, step=10)
+    upper_face_strength: FloatProperty(name="Upper Face Strength", default=1.0, min=0.0, max=3.0, step=10)
+    upper_face_smoothing: FloatProperty(name="Upper Face Smoothing", default=0.001, min=0.0, max=0.1, step=1, precision=4)
+    lower_face_strength: FloatProperty(name="Lower Face Strength", default=1.2, min=0.0, max=3.0, step=10)
+    lower_face_smoothing: FloatProperty(name="Lower Face Smoothing", default=0.006, min=0.0, max=0.1, step=1, precision=4)
+    face_mask_level: FloatProperty(name="Face Mask Level", default=0.6, min=0.0, max=1.0, step=10)
+    face_mask_softness: FloatProperty(name="Face Mask Softness", default=0.0085, min=0.0, max=0.1, step=1, precision=4)
+    eyelid_open_offset: FloatProperty(name="Eyelid Open Offset", default=0.06, min=-0.5, max=0.5, step=1)
+    lip_open_offset: FloatProperty(name="Lip Open Offset", default=-0.02, min=-0.5, max=0.5, step=1)
+
+    # ── Mapping ──
+    mapping_preset: EnumProperty(
+        name="Mapping Preset",
+        items=[
+            ('ARKIT', "ARKit (Standard)", "Standard ARKit blendshape names (MetaHuman, RPM compatible)"),
+            ('VRM', "VRM / VRChat", "VRM blendshape naming convention"),
+            ('CUSTOM', "Custom", "Use custom name mapping"),
+        ],
+        default='ARKIT',
+    )
+    mapping_items: CollectionProperty(type=A2F_PG_mapping_item)
+    mapping_items_index: IntProperty(default=0)
+```
+
+### 4.2 Mapping Item Property Group: A2F_PG_mapping_item
+
+```python
+class A2F_PG_mapping_item(bpy.types.PropertyGroup):
+    arkit_name: StringProperty(name="ARKit Name")
+    blender_name: StringProperty(name="Blender Shape Key", default="")
+    enabled: BoolProperty(name="Enabled", default=True)
+    multiplier: FloatProperty(name="Multiplier", default=1.0, min=0.0, max=5.0)
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 5: ERROR HANDLING SPECIFICATION
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 5.1 User-Facing Errors (self.report)
+
+| Condition | Level | Message |
+|-----------|-------|---------|
+| No audio file selected | ERROR | "No audio file selected. Please choose a WAV file." |
+| Audio file not found | ERROR | "Audio file not found: {path}" |
+| Audio not WAV format | ERROR | "Unsupported audio format. Please use WAV (PCM 16-bit)." |
+| Audio not 16-bit PCM | ERROR | "Audio must be 16-bit PCM WAV. Current: {bit_depth}-bit" |
+| Audio > 5 minutes | ERROR | "Audio exceeds 5 minute limit ({duration:.1f}s). Please use a shorter clip." |
+| Audio > 2 channels | ERROR | "Only mono or stereo audio supported. File has {channels} channels." |
+| No target mesh | ERROR | "No target mesh selected. Please select a mesh object." |
+| Mesh has no shape keys | WARNING | "Target mesh has no shape keys. Click 'Create Shape Keys' first." |
+| No API key (cloud mode) | ERROR | "No API key configured. Get one free at build.nvidia.com" |
+| Connection failed | ERROR | "Cannot connect to Audio2Face service: {details}" |
+| Connection timeout | ERROR | "Connection timed out after 10 seconds. Check your network/server." |
+| gRPC error | ERROR | "Audio2Face service error: {grpc_details}" |
+| Generation already running | WARNING | "Generation already in progress. Please wait." |
+| No animation data | WARNING | "No animation data to preview. Generate animation first." |
+| Server returned error | ERROR | "Server error: {status_message}" |
+| Stereo auto-converted | INFO | "Stereo audio auto-converted to mono." |
+| Resampled | INFO | "Audio resampled from {original}Hz to 16000Hz." |
+| Shape keys created | INFO | "Created {N} ARKit shape keys on {mesh_name}." |
+| Generation success | INFO | "Generated {N} frames of facial animation ({duration:.1f}s)." |
+| Mapping complete | INFO | "Mapped {N}/52 shape keys. {M} unmapped." |
+| Animation cleared | INFO | "Cleared animation from {N} shape keys." |
+| Connection OK | INFO | "Successfully connected to Audio2Face service." |
+
+### 5.2 Internal Error Handling
+
+- All gRPC calls wrapped in try/except grpc.aio.AioRpcError
+- Background thread exceptions caught and stored in GenerationState.error_message
+- Timer callback checks for errors and reports to user
+- Never let an exception propagate uncaught in background thread (would be silent)
+- Log all errors to Blender console if log_level >= INFO
+
+### 5.3 Network Retry Logic
+- Health check: single attempt, 5s timeout
+- Generation stream: single attempt, no retry (user can click Generate again)
+- If gRPC UNAVAILABLE: suggest checking network/server
+- If gRPC UNAUTHENTICATED: suggest checking API key
+- If gRPC RESOURCE_EXHAUSTED: suggest "API credits may be exhausted"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 6: DEPENDENCY MANAGEMENT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 6.1 Required Dependencies
+
+| Package | Version | Size | Why | Bundled How |
+|---------|---------|------|-----|-------------|
+| grpcio | >=1.64.1 | ~3MB | gRPC runtime | Wheel in wheels/ |
+| protobuf | >=5.27 | ~400KB | Protobuf runtime | Wheel in wheels/ |
+| numpy | any | — | Audio processing | Already in Blender |
+| nvidia_ace stubs | — | ~200KB | Protobuf stubs | Copied into vendor/ |
+
+### 6.2 NOT Required (Avoiding Bloat)
+
+| Package | Why Not | Alternative |
+|---------|---------|-------------|
+| scipy | 30MB, only needed for resampling | numpy linear interpolation |
+| soundfile | Needs libsndfile binary | Python stdlib `wave` module |
+| pyyaml | Only NVIDIA samples use it for config | We use Python dicts directly |
+| pandas | Only NVIDIA samples use for CSV export | Python stdlib `csv` module |
+
+### 6.3 Wheel Strategy for Blender Extension
+
+blender_manifest.toml:
+```toml
+[permissions]
+network = "Connect to NVIDIA Audio2Face-3D service for AI facial animation"
+files = "Read audio files and export animation data"
+
+wheels = [
+    "./wheels/grpcio-1.64.1-cp311-cp311-manylinux_2_17_x86_64.whl",
+    "./wheels/grpcio-1.64.1-cp311-cp311-win_amd64.whl",
+    "./wheels/grpcio-1.64.1-cp311-cp311-macosx_10_9_universal2.whl",
+    "./wheels/protobuf-5.27.0-cp311-cp311-manylinux2014_x86_64.whl",
+    "./wheels/protobuf-5.27.0-cp311-cp311-win_amd64.whl",
+    "./wheels/protobuf-5.27.0-cp311-cp311-macosx_10_9_universal2.whl",
+]
+```
+
+Note: Must bundle wheels for all platforms (linux-x64, win-amd64, macos-arm64/x64).
+Blender 4.2+ uses Python 3.11. Check exact version per Blender release.
+
+### 6.4 Vendor Directory (nvidia_ace stubs)
+Copy from Maya-ACE `python/grpc_py/nvidia_ace/` (MIT licensed):
+- Rename import paths to be relative within our addon
+- Or add vendor/ to sys.path at register time:
+  ```python
+  import sys, os
+  vendor_path = os.path.join(os.path.dirname(__file__), "vendor")
+  if vendor_path not in sys.path:
+      sys.path.insert(0, vendor_path)
+  ```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 7: IMPLEMENTATION ROADMAP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### Milestone 1: "Hello gRPC" — Prove the Connection Works
+Priority: CRITICAL | Ship-blocking
+
+Tasks:
+  1.1  Create addon package skeleton
+       - __init__.py with bl_info and blender_manifest.toml
+       - register() / unregister() with reload support
+       - Empty operators.py, panels.py, properties.py, preferences.py, constants.py
+
+  1.2  Implement constants.py
+       - ARKIT_BLENDSHAPE_NAMES: tuple of 52 strings in NVIDIA's exact order
+       - EMOTION_NAMES: tuple of 10 strings
+       - DEFAULT_MULTIPLIERS: dict per model (james, claire, mark)
+       - DEFAULT_OFFSETS: dict (all 0.0)
+       - DEFAULT_FACE_PARAMS: dict with 9 face parameter defaults
+       - DEFAULT_POST_PROCESSING: dict with 6 emotion post-processing defaults
+
+  1.3  Copy nvidia_ace protobuf stubs into vendor/
+       - From Maya-ACE python/grpc_py/nvidia_ace/
+       - Fix import paths (add vendor/ to sys.path in __init__.py)
+       - Verify stubs load without error
+
+  1.4  Implement core/client.py — minimal gRPC client
+       - Function: create_channel(mode, api_key, function_id, server_url) → channel
+       - Function: health_check(channel) → bool
+       - Function: generate(channel, audio_bytes, sample_rate, config) → list of frames
+       - All async, designed to run in asyncio.run() from a thread
+
+  1.5  Implement preferences.py
+       - A2F_AP_preferences with api_key, function_id, connection_mode, server_url
+
+  1.6  Implement basic properties.py
+       - A2F_PG_properties with audio_file, target_mesh, connection_mode, server_url
+
+  1.7  Implement A2F_OT_test_connection operator
+       - Runs health check in background thread
+       - Reports result to user
+
+  1.8  Implement minimal panel with just Test Connection button
+       - Verify end-to-end: addon loads → user enters API key → clicks test → gets "Connected"
+
+  Milestone 1 Exit Criteria:
+  ✓ Addon installs in Blender 4.2+ without errors
+  ✓ API key can be entered in preferences
+  ✓ Test Connection successfully reaches grpc.nvcf.nvidia.com:443
+  ✓ Health check returns "SERVING"
+
+---
+
+### Milestone 2: "Audio In, Weights Out" — Core Generation Pipeline
+Priority: CRITICAL | Ship-blocking
+
+Tasks:
+  2.1  Implement core/audio.py
+       - load_wav(filepath) → (sample_rate, data_int16, num_channels)
+       - convert_to_mono(data, num_channels) → mono_data
+       - resample(data, original_rate, target_rate=16000) → resampled_data
+       - chunk_audio(data, sample_rate) → list of bytes chunks
+       - validate_audio(filepath) → (ok, error_message)
+
+  2.2  Implement full core/client.py generate function
+       - Build AudioStreamHeader from addon properties + constants
+       - Stream audio chunks with emotion data on first chunk
+       - Receive animation data stream header (extract blendshape names)
+       - Receive animation data frames (extract timecodes + weights)
+       - Handle status response
+       - Return structured GenerationState
+
+  2.3  Implement A2F_OT_generate operator
+       - Validate all inputs
+       - Load and process audio
+       - Start background thread with gRPC call
+       - Register timer to poll results
+       - Apply animation on completion
+
+  2.4  Implement core/animation.py
+       - apply_animation(mesh, frames, mapping, scene_fps, frame_offset)
+       - Convert A2F 30 FPS timecodes to Blender frame numbers
+       - Insert keyframes per shape key per frame
+       - Set interpolation to LINEAR
+
+  2.5  Add progress reporting
+       - Window manager progress bar during generation
+       - Status text in panel updates during generation
+
+  Milestone 2 Exit Criteria:
+  ✓ Select audio WAV + mesh → click Generate → keyframes appear on timeline
+  ✓ Shape keys animate when scrubbing timeline
+  ✓ Works with both cloud API and local server
+  ✓ Progress bar shows during generation
+  ✓ Errors are reported clearly to user
+
+---
+
+### Milestone 3: "Artist-Ready" — Shape Keys, Mapping, Emotion
+Priority: HIGH | Required for release
+
+Tasks:
+  3.1  Implement A2F_OT_setup_shapekeys operator
+       - Create all 52 ARKit shape keys on target mesh
+       - Skip existing, report what was created
+
+  3.2  Implement core/mapping.py
+       - MappingPreset class with name_map dict
+       - ARKIT_PRESET: identity mapping (ARKit name → ARKit name)
+       - VRM_PRESET: VRM name → ARKit name mapping table
+       - auto_map(mesh, preset) → {arkit_name: blender_key_name}
+       - Case-insensitive matching
+
+  3.3  Implement A2F_OT_auto_map operator
+       - Runs auto_map and populates mapping_items CollectionProperty
+       - Reports match count
+
+  3.4  Implement emotion controls in properties + panel
+       - All 10 emotion sliders
+       - Auto-detect toggle
+       - Emotion strength, contrast, max_emotions
+       - Wire into gRPC AudioStreamHeader construction
+
+  3.5  Implement face parameter controls in properties + panel
+       - All 9 face parameters with defaults
+       - Reset to defaults button
+       - Wire into gRPC FaceParameters construction
+
+  3.6  Implement full panel layout (all sub-panels)
+       - Main panel with audio/mesh/model/generate
+       - Emotion sub-panel
+       - Face parameters sub-panel
+       - Mapping sub-panel
+       - Settings sub-panel
+
+  Milestone 3 Exit Criteria:
+  ✓ One-click shape key creation
+  ✓ Auto-mapping works for ARKit and VRM rigs
+  ✓ Emotion sliders affect generated output
+  ✓ Face parameters affect generated output
+  ✓ Full UI is clean and usable
+
+---
+
+### Milestone 4: "Polish" — Preview, Import/Export, Edge Cases
+Priority: MEDIUM | Nice for v1.0
+
+Tasks:
+  4.1  Implement A2F_OT_preview modal operator
+       - Timer-based playback of cached animation data
+       - Direct shape key value manipulation (no keyframes)
+       - Viewport redraw forcing
+       - ESC to cancel and restore
+
+  4.2  Implement A2F_OT_clear_animation operator
+       - Remove fcurves for mapped shape keys
+       - Reset values to 0.0
+
+  4.3  Implement A2F_OT_export_csv operator
+       - File browser dialog
+       - Write NVIDIA-compatible CSV format
+
+  4.4  Implement A2F_OT_import_csv operator
+       - File browser dialog
+       - Parse CSV, detect blendshape columns
+       - Apply using same animation pipeline
+
+  4.5  Edge case handling
+       - Long audio warning (>2 min: "This may use significant API credits")
+       - Mesh deleted during generation → graceful handling
+       - Blender closed during generation → thread cleanup
+       - Multiple rapid Generate clicks → debounce/ignore
+
+  4.6  Per-blendshape multiplier controls
+       - In mapping panel, per-shape multiplier slider
+       - Applied as post-processing before keyframe insertion
+
+  Milestone 4 Exit Criteria:
+  ✓ Preview plays animation in viewport
+  ✓ CSV import/export works with NVIDIA format
+  ✓ All edge cases handled gracefully
+  ✓ No crashes under any user interaction pattern
+
+---
+
+### Milestone 5: "Ship It" — Packaging, Docs, Distribution
+Priority: HIGH | Required for release
+
+Tasks:
+  5.1  Bundle wheels for all platforms
+       - Download grpcio + protobuf wheels for:
+         cp311-manylinux_2_17_x86_64 (Linux)
+         cp311-win_amd64 (Windows)
+         cp311-macosx_10_9_universal2 (macOS)
+       - Test installation on each platform
+
+  5.2  Write blender_manifest.toml
+       - All metadata, permissions, wheel references, tags
+
+  5.3  Test on clean Blender installations
+       - Blender 4.2, 4.3, 4.4
+       - Windows, macOS, Linux
+       - Fresh install with no other addons
+
+  5.4  Create README.md with:
+       - Installation instructions
+       - Quick start guide (5 steps)
+       - Getting NVIDIA API key walkthrough
+       - Screenshots of UI
+       - Supported audio formats
+       - Troubleshooting section
+
+  5.5  Create extension package
+       - blender --command extension build
+       - Test ZIP install on fresh Blender
+
+  5.6  Prepare store listings
+       - Superhive (Blender Market) product page
+       - Gumroad product page
+       - Screenshots, demo video, description
+
+  Milestone 5 Exit Criteria:
+  ✓ Extension installs from ZIP on all platforms
+  ✓ Works on Blender 4.2, 4.3, 4.4
+  ✓ README covers all user scenarios
+  ✓ Store listing is complete
+
+---
+
+### Milestone 6: "Growth" — Post-Launch (v1.1+)
+Priority: LOW | Future
+
+Tasks:
+  6.1  Batch processing mode
+       - Select folder of WAV files → generate all, export CSV per file
+
+  6.2  NLA strip support
+       - Push generated animation to NLA strip for layering
+
+  6.3  Audio playback sync in viewport
+       - Play audio while previewing animation
+
+  6.4  Local C++ SDK backend
+       - ctypes wrapper for libaudio2x.so / audio2x.dll
+       - Model download from HuggingFace
+       - TensorRT engine building
+
+  6.5  v3.0 model support
+       - Multiple character identities
+       - Geometry output (direct vertex positions, not just blendshapes)
+
+  6.6  Blender Extensions platform listing
+       - Submit to extensions.blender.org once stable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 8: TESTING PLAN
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 8.1 Unit Tests (run outside Blender)
+- core/audio.py: load, resample, chunk, validate
+- core/mapping.py: preset matching, case insensitivity
+- core/animation.py: FPS conversion math, frame number calculation
+- constants.py: verify all 52 names present, multiplier dict has all keys
+
+### 8.2 Integration Tests (run in Blender)
+- Addon register/unregister cycle without errors
+- Create mesh → setup shape keys → verify 53 key_blocks (Basis + 52)
+- Load WAV → generate with mock server → verify keyframes created
+- Auto-map on mesh with ARKit names → verify 52/52 mapped
+- Auto-map on mesh with VRM names → verify correct mapping
+
+### 8.3 Manual Test Matrix
+
+| Test | Cloud | Local | Expected |
+|------|-------|-------|----------|
+| Generate 5s WAV | ✓ | ✓ | ~150 frames, shape keys animate |
+| Generate 60s WAV | ✓ | ✓ | ~1800 frames, progress bar shows |
+| Generate 301s WAV | ✓ | ✓ | Error: exceeds 5 min limit |
+| Generate MP3 file | — | — | Error: unsupported format |
+| Generate stereo WAV | ✓ | ✓ | Auto-converts, info message |
+| Generate 44.1kHz WAV | ✓ | ✓ | Auto-resamples, info message |
+| No API key | — | — | Error: no API key |
+| Wrong API key | ✓ | — | Error: unauthenticated |
+| Server offline | — | ✓ | Error: connection failed |
+| No mesh selected | — | — | Error: no target mesh |
+| Mesh without shape keys | ✓ | ✓ | Auto-creates if enabled, else error |
+| Generate during generate | — | — | Warning: already running |
+| Delete mesh during generate | ✓ | ✓ | Graceful cancel, no crash |
+| Preview without data | — | — | Warning: no data |
+| Clear animation | ✓ | ✓ | All A2F keyframes removed |
+| Export CSV | ✓ | ✓ | Valid CSV in NVIDIA format |
+| Import CSV | ✓ | ✓ | Keyframes created from CSV |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 9: RISK REGISTRY
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+| # | Risk | Impact | Probability | Mitigation |
+|---|------|--------|-------------|------------|
+| 1 | NVIDIA cloud API credits run out for users | Users can't generate | Medium | Clear docs on credit limits, support local server mode |
+| 2 | NVIDIA changes gRPC protocol | Addon breaks | Low | Pin to specific proto version, monitor NVIDIA releases |
+| 3 | grpcio wheel incompatible with future Blender Python | Won't install | Medium | Test on each Blender release, rebuild wheels as needed |
+| 4 | NVIDIA discontinues cloud endpoint | Cloud mode broken | Medium | They already discontinued one (July 2025), emphasize local mode |
+| 5 | scipy-less resampling has lower quality | Artifacts in animation | Low | Linear interpolation is fine for speech; can add scipy optional |
+| 6 | Blender 5.x breaks addon API | Addon stops working | Low | Follow Blender deprecation warnings, test on betas |
+| 7 | Large extension size from wheels (~10MB) | Slow download | Low | Acceptable; similar to other Blender extensions |
+| 8 | Protobuf version conflict with other addons | Import errors | Medium | Namespace vendored stubs, lazy import grpcio |
+| 9 | NVIDIA API requires function_id that changes | Cloud mode breaks | Medium | Store function_id in preferences, document how to find it |
+| 10 | User's mesh has >10K shape keys (animation perf) | Slow keyframe insert | Low | Only animate mapped keys, batch keyframe insertion |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 10: LICENSING & LEGAL
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### 10.1 Our Addon License
+- Proprietary / commercial (sold on Blender Market / Gumroad)
+- OR GPL-3.0 if distributed on Blender Extensions platform
+  (Blender extensions require GPL-compatible license)
+- Strategy: dual license — GPL for free version, proprietary for paid features
+
+### 10.2 Third-Party Licenses We Must Comply With
+
+| Component | License | Our Obligation |
+|-----------|---------|---------------|
+| nvidia_ace protobuf stubs (from Maya-ACE) | MIT | Include MIT license text |
+| grpcio | Apache-2.0 | Include Apache license text |
+| protobuf | BSD-3-Clause | Include BSD license text |
+| Audio2Face-3D model (used via API) | MIT | No obligation (API call, not distributed) |
+| Blender Python API | GPL-2.0+ | Addon must be GPL-compatible if distributed with Blender |
+
+### 10.3 License File
+Include LICENSES/ directory:
+- LICENSES/MIT-nvidia-ace.txt
+- LICENSES/Apache-2.0-grpcio.txt
+- LICENSES/BSD-3-protobuf.txt
+- LICENSE.txt (our addon license)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## PART 11: NVIDIA PARTNERSHIP ROADMAP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+### Phase 1: Build & Ship (Now)
+- [ ] Build the addon following Maya-ACE architecture patterns
+- [ ] Use NVIDIA's protobuf stubs, config format, naming conventions
+- [ ] Join NVIDIA Developer Program (free): developer.nvidia.com
+- [ ] Join Audio2Face Discord community
+
+### Phase 2: Visibility (After v1.0 Launch)
+- [ ] Post demo video on NVIDIA Audio2Face Discord
+- [ ] Share on Blender Artists forum
+- [ ] Tweet/post with @NVIDIAOmniverse tag
+- [ ] Join NVIDIA Connect ISV program (free): nvidia.com/en-us/programs/isv/
+- [ ] Email connectprogram@nvidia.com introducing the project
+
+### Phase 3: Official Recognition (After Traction)
+- [ ] Request listing on Audio2Face-3D hub repo README (community section)
+- [ ] Request listing on developer.nvidia.com/ace ecosystem page
+- [ ] Submit GTC session proposal for next conference
+- [ ] Apply for NVIDIA Inception program (if incorporating as startup)
+
+### Phase 4: Partnership (If Significant Adoption)
+- [ ] Explore becoming ACE Service Delivery Partner (NPN)
+- [ ] Explore co-marketing with NVIDIA DevRel team
+- [ ] Explore NVIDIA Tech Blog spotlight article
